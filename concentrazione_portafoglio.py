@@ -25,24 +25,20 @@ Uso:
     python concentrazione_portafoglio.py --coppia SWDA.MI MWRD.MI   # diagnostica di una coppia
 """
 import argparse
-import json
 import os
 
-import firebase_admin
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 import yfinance as yf
 from dotenv import load_dotenv
-from firebase_admin import credentials, firestore
 from scipy.cluster.hierarchy import leaves_list, linkage
 from scipy.spatial.distance import squareform
+from firestore_client import init_firestore, get_collection, close_firestore
 
 load_dotenv()
 
 # --- CONFIGURAZIONE ---------------------------------------------------------
-FIREBASE_CREDENTIALS = os.getenv("FIREBASE_CREDENTIALS")
-FIREBASE_CREDENTIALS_JSON = os.getenv("FIREBASE_CREDENTIALS_JSON")
 COLLECTION = "portfolio"
 CAMPO_TICKER = "ticker"
 CAMPO_QUANTITA = "qt"
@@ -51,22 +47,6 @@ VALUTA_BASE = "EUR"
 
 FREQ = "W"          # rendimenti settimanali: meno rumore da fusi orari/orari di chiusura
 MIN_COPERTURA = 0.7  # scarta ticker con meno del 70% di osservazioni
-
-
-# --- FIRESTORE --------------------------------------------------------------
-def init_firestore():
-    if FIREBASE_CREDENTIALS_JSON:
-        cred = credentials.Certificate(json.loads(FIREBASE_CREDENTIALS_JSON))
-    elif FIREBASE_CREDENTIALS:
-        cred = credentials.Certificate(FIREBASE_CREDENTIALS)
-    else:
-        raise RuntimeError(
-            "Imposta FIREBASE_CREDENTIALS (percorso) o FIREBASE_CREDENTIALS_JSON (contenuto)."
-        )
-    if not firebase_admin._apps:
-        firebase_admin.initialize_app(cred)
-    return firestore.client()
-
 
 def normalizza_valuta(v):
     """'eur' -> 'EUR'; i pence di Londra ('GBp', 'GBX') restano distinti da 'GBP'."""
@@ -78,18 +58,20 @@ def carica_portafoglio_firestore():
     """Legge la collection "portfolio": DataFrame indicizzato per ticker con quantita e valuta."""
     db = init_firestore()
     righe = []
-    for doc in db.collection(COLLECTION).stream():
-        d = doc.to_dict()
-        t = str(d.get(CAMPO_TICKER, "")).strip().upper()
-        if not t:
-            print(f"[!] Documento {doc.id} senza campo '{CAMPO_TICKER}': ignorato")
-            continue
-        q = d.get(CAMPO_QUANTITA)
-        if q is None or q <= 0:
-            print(f"[!] {t} (documento {doc.id}): '{CAMPO_QUANTITA}' mancante o <= 0, ignorato")
-            continue
-        righe.append({"ticker": t, "quantita": float(q),
-                      "valuta": normalizza_valuta(d.get(CAMPO_VALUTA))})
+    try:
+        for ref, d in get_collection(db, COLLECTION):
+            t = str(d.get(CAMPO_TICKER, "")).strip().upper()
+            if not t:
+                print(f"[!] Documento {ref.id} senza campo '{CAMPO_TICKER}': ignorato")
+                continue
+            q = d.get(CAMPO_QUANTITA)
+            if q is None or q <= 0:
+                print(f"[!] {t} (documento {ref.id}): '{CAMPO_QUANTITA}' mancante o <= 0, ignorato")
+                continue
+            righe.append({"ticker": t, "quantita": float(q),
+                        "valuta": normalizza_valuta(d.get(CAMPO_VALUTA))})
+    finally:
+        close_firestore()
 
     if not righe:
         raise RuntimeError(
